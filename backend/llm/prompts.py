@@ -203,3 +203,95 @@ def verify_feature_grouping_prompt(
         f"  }}\n"
         f"]}}"
     )
+
+
+def discover_features_system_prompt() -> str:
+    """System prompt for feature discovery."""
+    return (
+        "You are a senior software engineer analyzing a codebase. "
+        "Your task is to identify the main user-facing features and capabilities "
+        "of the application by reading its code structure and content. "
+        "Focus on distinct functional areas that a developer would recognize as "
+        "separate features. Do NOT include infrastructure, configuration, or "
+        "utility code as features - only user-facing or API-facing capabilities."
+    )
+
+
+def discover_features_prompt(codebase_summary: str) -> str:
+    """Prompt to discover features from a codebase summary."""
+    return (
+        f"Analyze this codebase and identify its main features/capabilities.\n"
+        f"\n"
+        f"Codebase summary:\n"
+        f"```\n"
+        f"{codebase_summary}\n"
+        f"```\n"
+        f"\n"
+        f"Respond with a JSON object:\n"
+        f'{{"features": [\n'
+        f"  {{\n"
+        f'    "name": "Human-readable feature name (2-5 words)",\n'
+        f'    "description": "One sentence describing what this feature does",\n'
+        f'    "files": ["path/to/file1.py", "path/to/file2.py"],\n'
+        f'    "entry_points": ["file.py:function_name"],\n'
+        f'    "category": "core|api|utility|infrastructure"\n'
+        f"  }}\n"
+        f"]}}\n"
+        f"\n"
+        f"Rules:\n"
+        f"- Identify 3-10 features depending on codebase size\n"
+        f"- Each feature should have clear boundaries\n"
+        f"- Files can belong to multiple features\n"
+        f"- entry_points are the main function(s) that start the feature's execution\n"
+        f"- Only include features with category 'core' or 'api', skip pure infrastructure"
+    )
+
+
+def map_feature_flow_system_prompt() -> str:
+    """System prompt for feature flow mapping."""
+    return (
+        "You are a senior software engineer mapping the execution flow of a feature. "
+        "Trace how the code executes step by step, from entry point to final result. "
+        "Focus on the main happy path. Include function calls, data transformations, "
+        "and important side effects."
+    )
+
+
+def map_feature_flow_prompt(
+    *,
+    feature_name: str,
+    feature_description: str,
+    file_contents: dict[str, str],
+) -> str:
+    """Prompt to map the execution flow of a specific feature."""
+    files_text = ""
+    for path, content in file_contents.items():
+        files_text += f"\n--- {path} ---\n{content}\n"
+
+    return (
+        f"Map the code execution flow for this feature:\n"
+        f"Feature: {feature_name}\n"
+        f"Description: {feature_description}\n"
+        f"\n"
+        f"Source files:\n"
+        f"{files_text}\n"
+        f"\n"
+        f"Respond with a JSON object:\n"
+        f'{{"flow_summary": "2-3 sentence overview of the complete flow",\n'
+        f' "flow_steps": [\n'
+        f"  {{\n"
+        f'    "order": 1,\n'
+        f'    "file": "relative/path/to/file.py",\n'
+        f'    "function": "function_name",\n'
+        f'    "description": "What this step does (1-2 sentences)",\n'
+        f'    "calls_next": ["relative/path/to/file.py:next_function"]\n'
+        f"  }}\n"
+        f"]}}\n"
+        f"\n"
+        f"Rules:\n"
+        f"- Order steps by execution sequence (1, 2, 3...)\n"
+        f"- Each step is ONE function/method call\n"
+        f"- calls_next lists the functions called by this step\n"
+        f"- Include 3-15 steps covering the main execution path\n"
+        f"- Use exact file paths and function names from the source code"
+    )

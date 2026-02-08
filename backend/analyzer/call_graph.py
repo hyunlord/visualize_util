@@ -417,6 +417,14 @@ def build_call_graph(all_results: list[AnalysisResult]) -> CallGraph:
     # ------------------------------------------------------------------
     # Step 3: Resolve call/instantiate/inherit edges
     # ------------------------------------------------------------------
+    # Build a qualified_name -> FQN lookup so edge sources (which use
+    # the ``module:qualified_name`` format) can be mapped to node FQNs.
+    qname_to_fqn: dict[str, str] = {}
+    for fqn, node in graph.nodes.items():
+        qname = node.metadata.get("qualified_name", "")
+        if qname:
+            qname_to_fqn[qname] = fqn
+
     resolver = _TargetResolver(graph.nodes)
     all_edges: list[RawEdge] = []
 
@@ -432,9 +440,14 @@ def build_call_graph(all_results: list[AnalysisResult]) -> CallGraph:
             continue
 
         resolved_target = resolver.resolve(edge.target, edge.source)
+        # Resolve the source to a known node FQN.  Edge sources
+        # arrive in ``module:qualified_name`` format from the analyzer
+        # but nodes use ``file_path::name`` as their FQN.
+        resolved_source = qname_to_fqn.get(edge.source) or edge.source
+
         if resolved_target is not None:
             resolved_edges.append(RawEdge(
-                source=edge.source,
+                source=resolved_source,
                 target=resolved_target,
                 edge_type=edge.edge_type,
                 line_number=edge.line_number,
@@ -455,6 +468,34 @@ def build_call_graph(all_results: list[AnalysisResult]) -> CallGraph:
     # ------------------------------------------------------------------
     # Step 5: Build adjacency and final edge list
     # ------------------------------------------------------------------
+    # Build module-path -> first node FQN mapping for import edge sources.
+    # Import edges use dotted module paths (e.g. "backend.api.graph") as
+    # their source, which don't correspond to any node FQN directly.
+    # Map them to the first function/class node found in that file.
+    module_to_fqn: dict[str, str] = {}
+    for fqn, node in graph.nodes.items():
+        qname = node.metadata.get("qualified_name", "")
+        if qname and ":" in qname:
+            module_part = qname.split(":")[0]
+            if module_part not in module_to_fqn:
+                module_to_fqn[module_part] = fqn
+
+    # Normalise edge sources: resolve qualified_name and module-path
+    # formats to node FQNs so that both endpoints can be mapped to DB ids.
+    normalised_edges: list[RawEdge] = []
+    for edge in resolved_edges:
+        src = edge.source
+        if src not in graph.nodes:
+            src = qname_to_fqn.get(src) or module_to_fqn.get(src) or src
+        normalised_edges.append(RawEdge(
+            source=src,
+            target=edge.target,
+            edge_type=edge.edge_type,
+            line_number=edge.line_number,
+            metadata=edge.metadata,
+        ))
+    resolved_edges = normalised_edges
+
     # Ensure adjacency dicts use defaultdict behavior
     if not isinstance(graph.adjacency_forward, defaultdict):
         graph.adjacency_forward = defaultdict(set, graph.adjacency_forward)
@@ -475,6 +516,60 @@ def build_call_graph(all_results: list[AnalysisResult]) -> CallGraph:
             # Source exists but target is a module-level reference;
             # keep the edge but only in forward adjacency for reachability.
             graph.adjacency_forward[edge.source].add(edge.target)
+
+    # ------------------------------------------------------------------
+    # Step 6a: Resolve module-level import targets to file nodes
+    # ------------------------------------------------------------------
+    # Import edges often point to dotted module paths (e.g.
+    # "backend.config") that don't correspond to any node FQN.  When
+    # such a module maps to a file in the project, add forward edges
+    # to every top-level node in that file so BFS can propagate.
+    _file_to_nodes: dict[str, list[str]] = defaultdict(list)
+    for fqn, node in graph.nodes.items():
+        _file_to_nodes[node.file_path].append(fqn)
+
+    for src_fqn in list(graph.adjacency_forward.keys()):
+        for tgt in list(graph.adjacency_forward.get(src_fqn, ())):
+            if tgt in graph.nodes:
+                continue
+            # tgt is a module-level reference like "backend.config" --
+            # convert to possible file paths and link to their nodes.
+            candidate_path = tgt.replace(".", "/") + ".py"
+            for file_path, file_fqns in _file_to_nodes.items():
+                if file_path == candidate_path or file_path.endswith("/" + candidate_path):
+                    for file_fqn in file_fqns:
+                        graph.adjacency_forward[tgt].add(file_fqn)
+                        graph.adjacency_reverse[file_fqn].add(tgt)
+                    # Also make tgt reachable from src
+                    break
+
+    # ------------------------------------------------------------------
+    # Step 6b: Synthesise class → method ownership edges
+    # ------------------------------------------------------------------
+    # Python dunder methods (__init__, __repr__, etc.), properties,
+    # and regular methods are implicitly callable once a class is
+    # reachable.  Add forward edges from each class node to every
+    # method/property node that belongs to it so BFS naturally
+    # propagates reachability through classes.
+    class_nodes = {
+        fqn: node for fqn, node in graph.nodes.items()
+        if node.node_type == "class"
+    }
+    method_nodes = [
+        (fqn, node) for fqn, node in graph.nodes.items()
+        if node.node_type == "method"
+    ]
+    for class_fqn, class_node in class_nodes.items():
+        class_prefix = class_fqn.rsplit("::", 1)[0]  # file_path part
+        class_name = class_node.name
+        for method_fqn, method_node in method_nodes:
+            # Same file and method's qualified_name includes the class name.
+            if method_node.file_path != class_node.file_path:
+                continue
+            method_qname = method_node.metadata.get("qualified_name", "")
+            if f":{class_name}." in method_qname or f".{class_name}." in method_qname:
+                graph.adjacency_forward[class_fqn].add(method_fqn)
+                graph.adjacency_reverse[method_fqn].add(class_fqn)
 
     logger.info(
         "Call graph built: %d resolved edges, %d unresolved edges",

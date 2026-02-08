@@ -8,6 +8,7 @@ are persisted to the database through the provided SQLAlchemy async session.
 from __future__ import annotations
 
 import logging
+import os
 import traceback
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
@@ -129,37 +130,60 @@ class AnalysisEngine:
         db_features: list[Feature] = []
 
         try:
-            # ---- Stage 1: Code Parsing ----
-            await self._report_progress(progress_callback, "code_parsing", 0.0)
-            await self._stage_code_parsing(repo, stats)
-            await self._report_progress(progress_callback, "code_parsing", 1.0)
+            # Check if LLM is available - use LLM Agent pipeline
+            llm = self._get_llm_client()
+            if llm is not None and llm._config.api_key:
+                await self._run_llm_agent_pipeline(
+                    repo, snapshot, stats, progress_callback,
+                )
+            else:
+                # Fallback: existing AST-only pipeline
+                # ---- Stage 1: Code Parsing ----
+                await self._report_progress(progress_callback, "code_parsing", 0.0)
+                await self._stage_code_parsing(repo, stats)
+                await self._report_progress(progress_callback, "code_parsing", 1.0)
 
-            # ---- Stage 2: Feature Discovery ----
-            await self._report_progress(progress_callback, "feature_discovery", 0.0)
-            call_graph, feature_result = await self._stage_feature_discovery(
-                repo, stats,
-            )
-            await self._report_progress(progress_callback, "feature_discovery", 1.0)
+                # ---- Stage 2: Feature Discovery ----
+                await self._report_progress(progress_callback, "feature_discovery", 0.0)
+                call_graph, feature_result = await self._stage_feature_discovery(
+                    repo, stats,
+                )
+                # Replace raw edges with the call graph's resolved edges so
+                # that persisted edges use FQN source/target that map to nodes.
+                self._raw_edges = list(call_graph.edges)
 
-            # ---- Stage 3: Feature-Code Matching ----
-            await self._report_progress(progress_callback, "feature_matching", 0.0)
-            db_features = await self._stage_feature_matching(
-                repo, call_graph, feature_result, stats,
-            )
-            await self._report_progress(progress_callback, "feature_matching", 1.0)
+                # Resolve entry point names to node FQNs for the is_entry_point flag.
+                resolved_ep_fqns: set[str] = set()
+                for raw_ep in self._entry_point_fqns:
+                    resolved = call_graph._resolve_entry_point_fqn(raw_ep)
+                    if resolved is not None:
+                        resolved_ep_fqns.add(resolved)
+                    else:
+                        resolved_ep_fqns.add(raw_ep)
+                self._entry_point_fqns = resolved_ep_fqns
 
-            # ---- Stage 4: Unmatched Code Analysis ----
-            await self._report_progress(progress_callback, "unmatched_analysis", 0.0)
-            await self._stage_unmatched_analysis(call_graph, feature_result, stats)
-            await self._report_progress(progress_callback, "unmatched_analysis", 1.0)
+                await self._report_progress(progress_callback, "feature_discovery", 1.0)
 
-            # ---- Stage 5: Verification Loop ----
-            await self._report_progress(progress_callback, "verification", 0.0)
-            await self._stage_verification(call_graph, stats, progress_callback)
-            await self._report_progress(progress_callback, "verification", 1.0)
+                # ---- Stage 3: Feature-Code Matching ----
+                await self._report_progress(progress_callback, "feature_matching", 0.0)
+                db_features = await self._stage_feature_matching(
+                    repo, call_graph, feature_result, stats,
+                )
+                await self._report_progress(progress_callback, "feature_matching", 1.0)
 
-            # ---- Persist results ----
-            await self._persist_results(repo, snapshot, db_features, stats)
+                # ---- Stage 4: Unmatched Code Analysis ----
+                await self._report_progress(progress_callback, "unmatched_analysis", 0.0)
+                await self._stage_unmatched_analysis(call_graph, feature_result, stats)
+                await self._report_progress(progress_callback, "unmatched_analysis", 1.0)
+
+                # ---- Stage 5: Verification Loop ----
+                await self._report_progress(progress_callback, "verification", 0.0)
+                await self._stage_verification(call_graph, stats, progress_callback)
+                await self._report_progress(progress_callback, "verification", 1.0)
+
+                # ---- Persist results ----
+                await self._persist_results(repo, snapshot, db_features, stats)
+
             snapshot.status = "completed"
 
         except Exception as exc:
@@ -277,7 +301,14 @@ class AnalysisEngine:
         """
         db_features: list[Feature] = []
 
-        for fg in feature_result.features:
+        # Process more specific features first (fewer reachable nodes)
+        # so that general features get the leftover shared nodes.
+        sorted_features = sorted(
+            feature_result.features,
+            key=lambda fg: len(fg.node_fqns) + len(fg.entry_points),
+        )
+
+        for fg in sorted_features:
             feature_id = _uuid()
             db_feature = Feature(
                 id=feature_id,
@@ -293,8 +324,13 @@ class AnalysisEngine:
             # BFS from the feature's entry points to discover the full
             # reachable sub-graph and assign nodes to this feature.
             reachable: set[str] = set()
-            for ep_fqn in fg.entry_points:
-                reachable |= call_graph.reachable_from(ep_fqn)
+            for ep in fg.entry_points:
+                # EntryPoint objects carry a node_name string attribute.
+                ep_fqn = ep.node_name if hasattr(ep, "node_name") else str(ep)
+                # Resolve qualified name to graph FQN before BFS.
+                resolved = call_graph._resolve_entry_point_fqn(ep_fqn)
+                if resolved is not None:
+                    reachable |= call_graph.reachable_from(resolved)
 
             # Also include nodes explicitly listed in the feature group.
             reachable |= set(fg.node_fqns)
@@ -413,6 +449,142 @@ class AnalysisEngine:
         stats["verification_iterations"] = min(
             iteration, _MAX_VERIFICATION_ITERATIONS,
         )
+
+    # ------------------------------------------------------------------
+    # LLM Agent Pipeline
+    # ------------------------------------------------------------------
+
+    async def _run_llm_agent_pipeline(
+        self,
+        repo: Repository,
+        snapshot: AnalysisSnapshot,
+        stats: dict[str, Any],
+        progress_callback: ProgressCallback,
+    ) -> None:
+        """Run the LLM Agent analysis pipeline instead of the 5-stage AST pipeline."""
+        from backend.analyzer.llm_agent import CodeAnalysisAgent
+
+        llm = self._get_llm_client()
+        agent = CodeAnalysisAgent(llm)
+
+        def agent_progress(stage: str, pct: float) -> None:
+            import asyncio
+            if progress_callback:
+                try:
+                    result = progress_callback(stage, pct)
+                    if hasattr(result, "__await__"):
+                        asyncio.ensure_future(result)
+                except Exception:
+                    pass
+
+        result = await agent.analyze(repo.local_path, agent_progress)
+
+        # Persist LLM agent results
+        await self._persist_agent_results(repo, snapshot, result, stats)
+
+    async def _persist_agent_results(
+        self,
+        repo: Repository,
+        snapshot: AnalysisSnapshot,
+        result: Any,
+        stats: dict[str, Any],
+    ) -> None:
+        """Persist LLM agent analysis results to the database."""
+        _FEATURE_COLORS = [
+            "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",
+            "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#6366f1",
+        ]
+
+        db_features: list[Feature] = []
+        fqn_to_db_id: dict[str, str] = {}
+
+        for i, feature in enumerate(result.features):
+            feature_id = _uuid()
+            color = _FEATURE_COLORS[i % len(_FEATURE_COLORS)]
+
+            db_feature = Feature(
+                id=feature_id,
+                repo_id=repo.id,
+                name=feature.name,
+                description=feature.description,
+                color=color,
+                auto_detected=True,
+                verification_status="verified",
+                flow_summary=feature.flow_summary,
+            )
+            self._session.add(db_feature)
+            db_features.append(db_feature)
+
+            # Create CodeNode for each flow step
+            prev_node_id: str | None = None
+            for step in feature.flow_steps:
+                node_id = _uuid()
+                fqn = f"{step.file}::{step.function}"
+                fqn_to_db_id[fqn] = node_id
+
+                db_node = CodeNode(
+                    id=node_id,
+                    snapshot_id=snapshot.id,
+                    file_path=step.file,
+                    node_type="function",
+                    name=step.function,
+                    language=self._detect_language(step.file),
+                    line_start=step.line_start or 0,
+                    line_end=step.line_end or 0,
+                    source_code=step.source_code or "",
+                    docstring=None,
+                    feature_id=feature_id,
+                    is_entry_point=(step.order == 1),
+                    is_dead_code=False,
+                    description=step.description,
+                    flow_order=step.order,
+                    flow_description=step.description,
+                )
+                self._session.add(db_node)
+                step.node_id = node_id
+
+                # Create edge from previous step
+                if prev_node_id is not None:
+                    db_edge = CodeEdge(
+                        id=_uuid(),
+                        snapshot_id=snapshot.id,
+                        source_node_id=prev_node_id,
+                        target_node_id=node_id,
+                        edge_type="calls",
+                        is_llm_inferred=True,
+                    )
+                    self._session.add(db_edge)
+
+                prev_node_id = node_id
+
+        await self._session.flush()
+
+        stats["features"] = len(db_features)
+        stats["nodes"] = sum(len(f.flow_steps) for f in result.features)
+        stats["edges"] = stats["nodes"] - len(result.features)  # approx
+        stats["analysis_mode"] = "llm_agent"
+
+        # Persist snapshot
+        snapshot.status = "completed"
+        snapshot.analyzed_at = _utcnow()
+        snapshot.stats = stats
+        repo.last_analyzed_at = _utcnow()
+        repo.last_commit_sha = snapshot.commit_sha
+        self._session.add(snapshot)
+        self._session.add(repo)
+        await self._session.flush()
+
+    @staticmethod
+    def _detect_language(file_path: str) -> str:
+        """Detect language from file extension."""
+        ext_map = {
+            ".py": "python", ".js": "javascript", ".ts": "typescript",
+            ".tsx": "typescript", ".jsx": "javascript", ".java": "java",
+            ".go": "go", ".rs": "rust", ".rb": "ruby", ".php": "php",
+            ".c": "c", ".cpp": "cpp", ".cs": "csharp",
+        }
+        _, ext = os.path.splitext(file_path)
+        return ext_map.get(ext.lower(), "unknown")
 
     # ------------------------------------------------------------------
     # Persistence

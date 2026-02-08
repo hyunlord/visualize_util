@@ -92,6 +92,28 @@ class FeatureInfo(BaseModel):
     color: str
     node_count: int = 0
     auto_detected: bool = True
+    flow_summary: Optional[str] = None
+
+
+class FlowStep(BaseModel):
+    """A single step in a feature's code execution flow."""
+    order: int
+    node_id: Optional[str] = None
+    file: str
+    function: str
+    description: str
+    source_code: Optional[str] = None
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
+    calls_next: list[str] = Field(default_factory=list)
+
+
+class FeatureFlowResponse(BaseModel):
+    """Complete flow data for a single feature."""
+    feature: FeatureInfo
+    flow_summary: Optional[str] = None
+    flow_steps: list[FlowStep] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
 
 
 class GraphResponse(BaseModel):

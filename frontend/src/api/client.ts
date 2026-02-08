@@ -4,6 +4,7 @@ import type {
   AnalysisStatusResponse,
   GraphResponse,
   DeadCodeResponse,
+  FeatureFlowResponse,
 } from './types';
 
 const API_BASE = '/api';
@@ -55,5 +56,7 @@ export const api = {
   features: {
     list: (repoId: string) =>
       request<GraphResponse['features']>(`/repos/${repoId}/features`),
+    getFlow: (repoId: string, featureId: string) =>
+      request<FeatureFlowResponse>(`/repos/${repoId}/features/${featureId}/flow`),
   },
 };

@@ -21,7 +21,7 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
     "openrouter": "https://openrouter.ai/api/v1",
 }
 
-SUPPORTED_PROVIDERS = frozenset({"claude", "openai", "ollama", "openrouter"})
+SUPPORTED_PROVIDERS = frozenset({"claude", "openai", "ollama", "openrouter", "gemini"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +62,8 @@ class LLMConfig:
             # OpenRouter models already carry the org prefix (e.g.
             # "anthropic/claude-sonnet-4-20250514"), so pass through.
             return f"openrouter/{self.model}"
+        if self.provider == "gemini":
+            return f"gemini/{self.model}"
         # Claude and OpenAI models are recognized directly by litellm.
         return self.model
 

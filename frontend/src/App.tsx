@@ -1,59 +1,51 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import Layout from './components/Layout';
-import FlowGraph from './components/FlowGraph';
-import NodeDetail from './components/panels/NodeDetail';
-import DeadCodePanel from './components/panels/DeadCodePanel';
-import FeaturePanel from './components/panels/FeaturePanel';
+import FeatureOverview from './views/FeatureOverview';
+import FeatureFlowView from './views/FeatureFlowView';
+import FlowNodeDetail from './components/panels/FlowNodeDetail';
 import { useRepoStore } from './stores/repoStore';
 import { useGraphStore } from './stores/graphStore';
 
 export default function App() {
   const { fetchRepos, selectedRepoId } = useRepoStore();
-  const { nodes, selectedNodeId, deadCode, features } = useGraphStore();
-  const [showDeadCode, setShowDeadCode] = useState(false);
-  const [showFeatures, setShowFeatures] = useState(false);
+  const {
+    features,
+    currentView,
+    featureFlow,
+    flowLoading,
+    selectedNodeId,
+    loading,
+    fetchFeatureFlow,
+    goToOverview,
+    selectNode,
+  } = useGraphStore();
 
   useEffect(() => {
     fetchRepos();
   }, [fetchRepos]);
 
-  return (
-    <Layout>
-      {nodes.length > 0 ? (
-        <>
-          {/* Toolbar */}
-          <div className="absolute top-2 left-2 z-20 flex gap-2">
-            <button
-              onClick={() => { setShowFeatures(!showFeatures); setShowDeadCode(false); }}
-              className={`px-3 py-1.5 text-xs rounded-lg border ${
-                showFeatures
-                  ? 'bg-blue-600/20 border-blue-500/40 text-blue-400'
-                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-              }`}
-            >
-              Features ({features.length})
-            </button>
-            <button
-              onClick={() => { setShowDeadCode(!showDeadCode); setShowFeatures(false); }}
-              className={`px-3 py-1.5 text-xs rounded-lg border ${
-                showDeadCode
-                  ? 'bg-red-600/20 border-red-500/40 text-red-400'
-                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-              }`}
-            >
-              Dead Code ({deadCode.length})
-            </button>
+  const handleSelectFeature = (featureId: string) => {
+    if (selectedRepoId) {
+      fetchFeatureFlow(selectedRepoId, featureId);
+    }
+  };
+
+  const renderContent = () => {
+    // Loading state
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center h-full">
+          <div className="text-center">
+            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-sm text-slate-400">Loading graph data...</p>
           </div>
+        </div>
+      );
+    }
 
-          {/* Panels */}
-          {showFeatures && <FeaturePanel onClose={() => setShowFeatures(false)} />}
-          {showDeadCode && <DeadCodePanel onClose={() => setShowDeadCode(false)} />}
-          {selectedNodeId && <NodeDetail />}
-
-          {/* Graph */}
-          <FlowGraph />
-        </>
-      ) : (
+    // No features yet
+    if (features.length === 0) {
+      return (
         <div className="flex items-center justify-center h-full">
           <div className="text-center">
             <div className="text-6xl mb-4 opacity-20">&#x1f4ca;</div>
@@ -69,7 +61,47 @@ export default function App() {
             </p>
           </div>
         </div>
-      )}
+      );
+    }
+
+    // Feature Flow View
+    if (currentView === 'flow' && featureFlow) {
+      return (
+        <>
+          <FeatureFlowView
+            flowData={featureFlow}
+            onBack={goToOverview}
+            onNodeClick={selectNode}
+          />
+          {selectedNodeId && <FlowNodeDetail />}
+        </>
+      );
+    }
+
+    // Flow loading state
+    if (flowLoading) {
+      return (
+        <div className="flex items-center justify-center h-full">
+          <div className="text-center">
+            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-sm text-slate-400">Loading feature flow...</p>
+          </div>
+        </div>
+      );
+    }
+
+    // Feature Overview (default)
+    return (
+      <FeatureOverview
+        features={features}
+        onSelectFeature={handleSelectFeature}
+      />
+    );
+  };
+
+  return (
+    <Layout>
+      {renderContent()}
     </Layout>
   );
 }

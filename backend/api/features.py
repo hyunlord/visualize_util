@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.db_models import CodeNode, Feature, Repository
-from backend.models.schemas import FeatureInfo
+from backend.models.schemas import FeatureFlowResponse, FeatureInfo, FlowStep as FlowStepSchema, GraphEdge
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -59,6 +59,7 @@ async def _build_feature_info(
         color=feature.color,
         node_count=node_count,
         auto_detected=feature.auto_detected,
+        flow_summary=feature.flow_summary,
     )
 
 
@@ -117,6 +118,7 @@ async def list_features(
             color=f.color,
             node_count=counts_map.get(f.id, 0),
             auto_detected=f.auto_detected,
+            flow_summary=f.flow_summary,
         )
         for f in features
     ]
@@ -168,3 +170,107 @@ async def update_feature(
     await db.refresh(feature)
 
     return await _build_feature_info(db, feature)
+
+
+# ---------------------------------------------------------------------------
+# GET /repos/{repo_id}/features/{feature_id}/flow  --  get feature flow
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{repo_id}/features/{feature_id}/flow",
+    response_model=FeatureFlowResponse,
+    summary="Get the execution flow for a feature",
+)
+async def get_feature_flow(
+    repo_id: str,
+    feature_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> FeatureFlowResponse:
+    """Return the step-by-step execution flow for a specific feature."""
+    from backend.models.db_models import CodeEdge, AnalysisSnapshot
+
+    repo = await db.get(Repository, repo_id)
+    if repo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository not found: {repo_id}",
+        )
+
+    feature = await db.get(Feature, feature_id)
+    if feature is None or feature.repo_id != repo_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Feature not found: {feature_id}",
+        )
+
+    # Get feature info with node count
+    feature_info = await _build_feature_info(db, feature)
+
+    # Get nodes ordered by flow_order
+    nodes_result = await db.execute(
+        select(CodeNode)
+        .where(CodeNode.feature_id == feature_id)
+        .order_by(CodeNode.flow_order.asc().nullslast())
+    )
+    nodes = list(nodes_result.scalars().all())
+
+    # Build flow steps
+    flow_steps = []
+    node_ids = {n.id for n in nodes}
+    for node in nodes:
+        flow_steps.append(FlowStepSchema(
+            order=node.flow_order or 0,
+            node_id=node.id,
+            file=node.file_path,
+            function=node.name,
+            description=node.flow_description or node.description or "",
+            source_code=node.source_code,
+            line_start=node.line_start,
+            line_end=node.line_end,
+            calls_next=[],
+        ))
+
+    # Get edges between these nodes
+    if node_ids:
+        edges_result = await db.execute(
+            select(CodeEdge).where(
+                CodeEdge.source_node_id.in_(node_ids),
+                CodeEdge.target_node_id.in_(node_ids),
+            )
+        )
+        edges = list(edges_result.scalars().all())
+
+        # Build calls_next for each step
+        node_id_to_step: dict[str, FlowStepSchema] = {
+            s.node_id: s for s in flow_steps if s.node_id
+        }
+        for edge in edges:
+            source_step = node_id_to_step.get(edge.source_node_id)
+            if source_step:
+                source_step.calls_next.append(edge.target_node_id)
+
+        graph_edges = [
+            GraphEdge(
+                id=e.id,
+                source=e.source_node_id,
+                target=e.target_node_id,
+                type=e.edge_type,
+                animated=e.edge_type == "calls",
+                data={
+                    "edgeType": e.edge_type,
+                    "lineNumber": e.line_number,
+                    "isLlmInferred": e.is_llm_inferred,
+                },
+            )
+            for e in edges
+        ]
+    else:
+        graph_edges = []
+
+    return FeatureFlowResponse(
+        feature=feature_info,
+        flow_summary=feature.flow_summary,
+        flow_steps=flow_steps,
+        edges=graph_edges,
+    )

@@ -141,6 +141,7 @@ class Feature(Base):
     verification_notes: Mapped[str | None] = mapped_column(
         Text, nullable=True,
     )
+    flow_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # -- relationships --
     repository: Mapped[Repository] = relationship(back_populates="features")
@@ -190,6 +191,8 @@ class CodeNode(Base):
     is_entry_point: Mapped[bool] = mapped_column(Boolean, default=False)
     is_dead_code: Mapped[bool] = mapped_column(Boolean, default=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flow_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    flow_description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # -- relationships --
     snapshot: Mapped[AnalysisSnapshot] = relationship(

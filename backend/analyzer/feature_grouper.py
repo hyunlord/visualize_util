@@ -282,6 +282,15 @@ def _separate_shared(
 # ------------------------------------------------------------------
 
 
+def _strip_path_params(url: str) -> str:
+    """Remove path parameter segments like ``{id}`` or ``:id`` from a URL."""
+    segments = url.strip("/").split("/")
+    return "/".join(
+        s for s in segments
+        if s and not s.startswith("{") and not s.startswith(":")
+    )
+
+
 def _generate_default_name(cluster: list[EntryPoint], index: int) -> tuple[str, str]:
     """Generate a default feature name from cluster entry points when LLM is unavailable.
 
@@ -290,16 +299,50 @@ def _generate_default_name(cluster: list[EntryPoint], index: int) -> tuple[str, 
     if not cluster:
         return f"feature_{index}", f"Feature group {index}"
 
-    # Try to derive a name from URL prefixes
+    # Collect function names for fallback
+    func_names = []
+    for ep in cluster:
+        short = ep.node_name.split("::")[-1].split(":")[-1]
+        if short:
+            func_names.append(short)
+
+    # Try to derive a name from URL prefixes (strip path params first)
     urls = [ep.route_info.get("url", "") for ep in cluster if ep.route_info.get("url")]
-    if urls:
-        # Find common prefix
-        common = os.path.commonprefix(urls).strip("/")
+    cleaned_urls = [_strip_path_params(u) for u in urls]
+    cleaned_urls = [u for u in cleaned_urls if u]  # filter empty
+
+    if cleaned_urls:
+        common = os.path.commonprefix(cleaned_urls).strip("/")
         if common:
-            # Clean up the prefix into a snake_case name
-            name = re.sub(r"[^a-zA-Z0-9]+", "_", common).strip("_").lower()
-            if name:
-                return name, f"Handles {common} endpoints"
+            # Convert URL path to readable name: "dead-code" → "Dead Code"
+            readable = common.replace("/", " ").replace("-", " ").replace("_", " ")
+            readable = " ".join(w.capitalize() for w in readable.split())
+            snake = re.sub(r"[^a-zA-Z0-9]+", "_", common).strip("_").lower()
+            if snake:
+                methods = {
+                    ep.route_info.get("method", "").upper()
+                    for ep in cluster if ep.route_info.get("method")
+                }
+                method_str = "/".join(sorted(methods)) if methods else ""
+                desc = f"{method_str} /{common}" if method_str else f"Handles /{common}"
+                return readable, desc
+
+    # Try using function names to create a meaningful name
+    if func_names:
+        # Group by common prefix of function names (e.g. list_repos, create_repo -> Repo)
+        if len(func_names) == 1:
+            readable = func_names[0].replace("_", " ").title()
+            return readable, f"Endpoint: {func_names[0]}"
+        # Use the common noun: create_repo, list_repos → "Repos"
+        words_sets = [set(fn.split("_")) for fn in func_names]
+        common_words = words_sets[0]
+        for ws in words_sets[1:]:
+            common_words &= ws
+        # Remove common verbs
+        common_words -= {"get", "set", "list", "create", "update", "delete", "post", "put"}
+        if common_words:
+            readable = " ".join(w.capitalize() for w in sorted(common_words))
+            return readable, f"Endpoints: {', '.join(func_names)}"
 
     # Try CLI command group
     commands = [ep.route_info.get("command", "") for ep in cluster if ep.route_info.get("command")]
@@ -308,16 +351,43 @@ def _generate_default_name(cluster: list[EntryPoint], index: int) -> tuple[str, 
         if name:
             return name, f"CLI command group: {commands[0]}"
 
-    # Try entry type
+    # Try entry type for non-generic types
     types = {ep.entry_type for ep in cluster}
     if len(types) == 1:
         entry_type = next(iter(types))
-        return f"{entry_type}_{index}", f"Feature group for {entry_type} entry points"
+        if entry_type == "websocket":
+            ws_urls = [_strip_path_params(ep.route_info.get("url", "")) for ep in cluster]
+            ws_url = ws_urls[0] if ws_urls else ""
+            readable = ws_url.replace("/", " ").replace("-", " ").strip().title() or "WebSocket"
+            return f"{readable} (WS)", f"WebSocket endpoint: {ws_url or func_names[0] if func_names else 'unknown'}"
+        if entry_type == "cli":
+            return f"CLI {index}", f"CLI entry point group"
 
-    # Fallback
-    first_name = cluster[0].node_name.split("::")[-1].split(":")[-1]
-    snake_name = re.sub(r"[^a-zA-Z0-9]+", "_", first_name).strip("_").lower()
-    return snake_name or f"feature_{index}", f"Feature anchored by {first_name}"
+    # Fallback: use first function name or combine function names
+    if func_names:
+        if len(func_names) == 1:
+            readable = func_names[0].replace("_", " ").title()
+            return readable, f"Endpoint: {func_names[0]}"
+        # Try to find the dominant noun across functions
+        all_words: list[str] = []
+        for fn in func_names:
+            all_words.extend(fn.split("_"))
+        # Remove common verbs and find most frequent noun
+        verbs = {"get", "set", "list", "create", "update", "delete", "post",
+                 "put", "start", "stop", "run", "is", "has", "do"}
+        nouns = [w for w in all_words if w.lower() not in verbs and len(w) > 2]
+        if nouns:
+            # Pick the most common noun
+            from collections import Counter
+            noun_counts = Counter(nouns)
+            best_noun = noun_counts.most_common(1)[0][0]
+            readable = best_noun.replace("_", " ").title()
+            return readable, f"Endpoints: {', '.join(func_names)}"
+        # Last resort: join first two function names
+        readable = " & ".join(fn.replace("_", " ").title() for fn in func_names[:2])
+        return readable, f"Endpoints: {', '.join(func_names)}"
+
+    return f"feature_{index}", f"Feature group {index}"
 
 
 async def _llm_name_features(
@@ -611,6 +681,25 @@ async def _group_features_async(
 
     # Remove empty features
     features = [f for f in features if f.node_fqns or f.entry_points]
+
+    # Deduplicate names by appending a qualifier from entry points
+    name_counts: dict[str, int] = defaultdict(int)
+    for feat in features:
+        name_counts[feat.name] += 1
+    seen_names: dict[str, int] = defaultdict(int)
+    for feat in features:
+        if name_counts[feat.name] > 1:
+            seen_names[feat.name] += 1
+            # Try to differentiate using function names from entry points
+            funcs = [
+                ep.node_name.split("::")[-1].split(":")[-1]
+                for ep in feat.entry_points
+            ]
+            if funcs:
+                qualifier = funcs[0].replace("_", " ").title()
+                feat.name = f"{feat.name} ({qualifier})"
+            else:
+                feat.name = f"{feat.name} {seen_names[feat.name]}"
 
     logger.info(
         "Feature grouping complete: %d features, %d shared utils, %d unmatched",

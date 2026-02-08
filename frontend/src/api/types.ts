@@ -63,12 +63,32 @@ export interface FeatureInfo {
   color: string;
   node_count: number;
   auto_detected: boolean;
+  flow_summary?: string | null;
 }
 
 export interface GraphResponse {
   nodes: GraphNode[];
   edges: GraphEdge[];
   features: FeatureInfo[];
+}
+
+export interface FlowStep {
+  order: number;
+  node_id: string | null;
+  file: string;
+  function: string;
+  description: string;
+  source_code: string | null;
+  line_start: number | null;
+  line_end: number | null;
+  calls_next: string[];
+}
+
+export interface FeatureFlowResponse {
+  feature: FeatureInfo;
+  flow_summary: string | null;
+  flow_steps: FlowStep[];
+  edges: GraphEdge[];
 }
 
 export interface DeadCodeItem {

@@ -17,6 +17,7 @@ class LLMProvider(str, Enum):
     OPENAI = "openai"
     OLLAMA = "ollama"
     OPENROUTER = "openrouter"
+    GEMINI = "gemini"
 
 
 class Settings(BaseSettings):
