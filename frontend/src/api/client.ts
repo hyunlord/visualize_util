@@ -35,9 +35,10 @@ export const api = {
   },
 
   analysis: {
-    start: (repoId: string) =>
+    start: (repoId: string, language: string = 'en') =>
       request<AnalysisStatusResponse>(`/repos/${repoId}/analyze`, {
         method: 'POST',
+        body: JSON.stringify({ language }),
       }),
     status: (repoId: string) =>
       request<AnalysisStatusResponse>(`/repos/${repoId}/analyze`),

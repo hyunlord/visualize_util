@@ -49,6 +49,15 @@ class FlowStep:
 
 
 @dataclass
+class FunctionSignature:
+    """A function/class signature extracted from AST."""
+    file: str
+    name: str
+    line_start: int
+    line_end: int
+
+
+@dataclass
 class DiscoveredFeature:
     """A feature discovered by the LLM agent."""
     name: str
@@ -66,13 +75,15 @@ class AgentAnalysisResult:
     """Complete result from the LLM agent analysis."""
     features: list[DiscoveredFeature]
     file_tree: list[str]
+    all_functions: list[FunctionSignature] = field(default_factory=list)
 
 
 class CodeAnalysisAgent:
     """LLM Agent that reads code, discovers features, and maps execution flows."""
 
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(self, llm: LLMClient, language: str = "en") -> None:
         self._llm = llm
+        self._language = language
 
     async def analyze(
         self,
@@ -97,7 +108,7 @@ class CodeAnalysisAgent:
         # Step 2: LLM discovers features
         if progress_callback:
             progress_callback("LLM discovering features", 15.0)
-        features = await self._discover_features(summary)
+        features = await self._discover_features(summary, self._language)
         logger.info("LLM discovered %d features", len(features))
 
         # Step 3: Map execution flow for each feature
@@ -106,7 +117,7 @@ class CodeAnalysisAgent:
             pct = 30.0 + (i / max(total_features, 1)) * 50.0
             if progress_callback:
                 progress_callback(f"Mapping flow: {feature.name}", pct)
-            await self._map_feature_flow(feature, repo_path)
+            await self._map_feature_flow(feature, repo_path, self._language)
 
         # Step 4: AST verification
         if progress_callback:
@@ -116,7 +127,22 @@ class CodeAnalysisAgent:
         if progress_callback:
             progress_callback("Analysis complete", 100.0)
 
-        return AgentAnalysisResult(features=features, file_tree=file_tree)
+        # Collect all function signatures for dead code detection
+        all_functions: list[FunctionSignature] = []
+        for file_path, sigs in file_sigs.items():
+            for func_name, (line_start, line_end) in sigs.items():
+                all_functions.append(FunctionSignature(
+                    file=file_path,
+                    name=func_name,
+                    line_start=line_start,
+                    line_end=line_end,
+                ))
+
+        return AgentAnalysisResult(
+            features=features,
+            file_tree=file_tree,
+            all_functions=all_functions,
+        )
 
     # ------------------------------------------------------------------
     # Step 1: Build codebase summary
@@ -260,10 +286,10 @@ class CodeAnalysisAgent:
     # Step 2: LLM discovers features
     # ------------------------------------------------------------------
 
-    async def _discover_features(self, summary: str) -> list[DiscoveredFeature]:
+    async def _discover_features(self, summary: str, language: str = "en") -> list[DiscoveredFeature]:
         """Ask the LLM to identify features from the codebase summary."""
         result = await self._llm.complete_json(
-            discover_features_prompt(summary),
+            discover_features_prompt(summary, language=language),
             system=discover_features_system_prompt(),
             temperature=0.2,
             max_tokens=4000,
@@ -303,6 +329,7 @@ class CodeAnalysisAgent:
         self,
         feature: DiscoveredFeature,
         repo_path: str,
+        language: str = "en",
     ) -> None:
         """Ask the LLM to map the execution flow for a feature."""
         # Collect file contents for this feature
@@ -325,6 +352,7 @@ class CodeAnalysisAgent:
                 feature_name=feature.name,
                 feature_description=feature.description,
                 file_contents=file_contents,
+                language=language,
             ),
             system=map_feature_flow_system_prompt(),
             temperature=0.1,

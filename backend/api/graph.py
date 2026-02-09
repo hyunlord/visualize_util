@@ -102,6 +102,7 @@ def _feature_to_info(feature: Feature, node_count: int) -> FeatureInfo:
         color=feature.color,
         node_count=node_count,
         auto_detected=feature.auto_detected,
+        flow_summary=feature.flow_summary,
     )
 
 

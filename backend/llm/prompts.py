@@ -8,6 +8,18 @@ fully-formatted prompt string ready for ``LLMClient.complete()`` or
 from __future__ import annotations
 
 
+# Language instruction templates for multi-language support
+_LANGUAGE_INSTRUCTIONS: dict[str, str] = {
+    "en": "Respond in English.",
+    "ko": "모든 기능 이름(name), 설명(description), 코드 설명(flow_summary, description)을 한국어로 작성해주세요. JSON 키는 영어 그대로 유지하세요.",
+}
+
+
+def _get_language_instruction(language: str) -> str:
+    """Get the language instruction for the given language code."""
+    return _LANGUAGE_INSTRUCTIONS.get(language, _LANGUAGE_INSTRUCTIONS["en"])
+
+
 def describe_function_prompt(
     *,
     function_name: str,
@@ -217,8 +229,9 @@ def discover_features_system_prompt() -> str:
     )
 
 
-def discover_features_prompt(codebase_summary: str) -> str:
+def discover_features_prompt(codebase_summary: str, *, language: str = "en") -> str:
     """Prompt to discover features from a codebase summary."""
+    lang_instruction = _get_language_instruction(language)
     return (
         f"Analyze this codebase and identify its main features/capabilities.\n"
         f"\n"
@@ -243,7 +256,9 @@ def discover_features_prompt(codebase_summary: str) -> str:
         f"- Each feature should have clear boundaries\n"
         f"- Files can belong to multiple features\n"
         f"- entry_points are the main function(s) that start the feature's execution\n"
-        f"- Only include features with category 'core' or 'api', skip pure infrastructure"
+        f"- Only include features with category 'core' or 'api', skip pure infrastructure\n"
+        f"\n"
+        f"Language instruction: {lang_instruction}"
     )
 
 
@@ -262,8 +277,10 @@ def map_feature_flow_prompt(
     feature_name: str,
     feature_description: str,
     file_contents: dict[str, str],
+    language: str = "en",
 ) -> str:
     """Prompt to map the execution flow of a specific feature."""
+    lang_instruction = _get_language_instruction(language)
     files_text = ""
     for path, content in file_contents.items():
         files_text += f"\n--- {path} ---\n{content}\n"
@@ -293,5 +310,7 @@ def map_feature_flow_prompt(
         f"- Each step is ONE function/method call\n"
         f"- calls_next lists the functions called by this step\n"
         f"- Include 3-15 steps covering the main execution path\n"
-        f"- Use exact file paths and function names from the source code"
+        f"- Use exact file paths and function names from the source code\n"
+        f"\n"
+        f"Language instruction: {lang_instruction}"
     )

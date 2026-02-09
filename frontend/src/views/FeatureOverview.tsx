@@ -1,12 +1,16 @@
-import type { FeatureInfo } from '../api/types';
+import { useState } from 'react';
+import type { FeatureInfo, DeadCodeItem } from '../api/types';
 import FeatureCard from '../components/FeatureCard';
 
 interface FeatureOverviewProps {
   features: FeatureInfo[];
+  deadCode?: DeadCodeItem[];
   onSelectFeature: (featureId: string) => void;
 }
 
-export default function FeatureOverview({ features, onSelectFeature }: FeatureOverviewProps) {
+export default function FeatureOverview({ features, deadCode = [], onSelectFeature }: FeatureOverviewProps) {
+  const [showDeadCode, setShowDeadCode] = useState(false);
+
   if (features.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -44,6 +48,54 @@ export default function FeatureOverview({ features, onSelectFeature }: FeatureOv
             />
           ))}
         </div>
+
+        {/* Dead Code Section */}
+        {deadCode.length > 0 && (
+          <div className="mt-8">
+            <button
+              onClick={() => setShowDeadCode(!showDeadCode)}
+              className="flex items-center gap-2 text-sm font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              <svg
+                className={`w-4 h-4 transition-transform ${showDeadCode ? 'rotate-90' : ''}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+              Dead Code ({deadCode.length} items)
+            </button>
+
+            {showDeadCode && (
+              <div className="mt-3 space-y-2">
+                {deadCode.map((item) => (
+                  <div
+                    key={item.node_id}
+                    className="px-4 py-3 rounded-lg bg-slate-800/50 border border-slate-700/50"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 font-medium">
+                        DEAD
+                      </span>
+                      <span className="text-sm font-mono text-slate-300">
+                        {item.name}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1 font-mono">
+                      {item.file_path}:{item.line_start}-{item.line_end}
+                    </div>
+                    {item.reason && (
+                      <div className="text-xs text-slate-500 mt-1">
+                        {item.reason}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

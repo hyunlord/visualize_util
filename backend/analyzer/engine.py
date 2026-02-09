@@ -105,6 +105,7 @@ class AnalysisEngine:
         repo: Repository,
         snapshot: AnalysisSnapshot,
         progress_callback: ProgressCallback = None,
+        language: str = "en",
     ) -> None:
         """Execute the full five-stage analysis pipeline.
 
@@ -134,7 +135,7 @@ class AnalysisEngine:
             llm = self._get_llm_client()
             if llm is not None and llm._config.api_key:
                 await self._run_llm_agent_pipeline(
-                    repo, snapshot, stats, progress_callback,
+                    repo, snapshot, stats, progress_callback, language=language,
                 )
             else:
                 # Fallback: existing AST-only pipeline
@@ -460,12 +461,13 @@ class AnalysisEngine:
         snapshot: AnalysisSnapshot,
         stats: dict[str, Any],
         progress_callback: ProgressCallback,
+        language: str = "en",
     ) -> None:
         """Run the LLM Agent analysis pipeline instead of the 5-stage AST pipeline."""
         from backend.analyzer.llm_agent import CodeAnalysisAgent
 
         llm = self._get_llm_client()
-        agent = CodeAnalysisAgent(llm)
+        agent = CodeAnalysisAgent(llm, language=language)
 
         def agent_progress(stage: str, pct: float) -> None:
             import asyncio
@@ -489,7 +491,13 @@ class AnalysisEngine:
         result: Any,
         stats: dict[str, Any],
     ) -> None:
-        """Persist LLM agent analysis results to the database."""
+        """Persist LLM agent analysis results to the database.
+
+        Uses a two-pass approach for edges:
+        - Pass 1: Create all nodes and build fqn_to_db_id map
+        - Pass 2: Create edges from calls_next with sequential fallback
+        Also detects dead code by comparing AST functions vs feature-assigned ones.
+        """
         _FEATURE_COLORS = [
             "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",
             "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#6366f1",
@@ -497,7 +505,10 @@ class AnalysisEngine:
 
         db_features: list[Feature] = []
         fqn_to_db_id: dict[str, str] = {}
+        assigned_functions: set[str] = set()  # Track functions assigned to features
+        edge_count = 0
 
+        # --- Pass 1: Create all features and nodes ---
         for i, feature in enumerate(result.features):
             feature_id = _uuid()
             color = _FEATURE_COLORS[i % len(_FEATURE_COLORS)]
@@ -515,12 +526,11 @@ class AnalysisEngine:
             self._session.add(db_feature)
             db_features.append(db_feature)
 
-            # Create CodeNode for each flow step
-            prev_node_id: str | None = None
             for step in feature.flow_steps:
                 node_id = _uuid()
                 fqn = f"{step.file}::{step.function}"
                 fqn_to_db_id[fqn] = node_id
+                assigned_functions.add(f"{step.file}:{step.function}")
 
                 db_node = CodeNode(
                     id=node_id,
@@ -543,25 +553,90 @@ class AnalysisEngine:
                 self._session.add(db_node)
                 step.node_id = node_id
 
-                # Create edge from previous step
-                if prev_node_id is not None:
-                    db_edge = CodeEdge(
-                        id=_uuid(),
-                        snapshot_id=snapshot.id,
-                        source_node_id=prev_node_id,
-                        target_node_id=node_id,
-                        edge_type="calls",
-                        is_llm_inferred=True,
-                    )
-                    self._session.add(db_edge)
+        await self._session.flush()
 
-                prev_node_id = node_id
+        # --- Pass 2: Create edges using calls_next with sequential fallback ---
+        for feature in result.features:
+            steps = feature.flow_steps
+            for idx, step in enumerate(steps):
+                if not step.node_id:
+                    continue
+
+                source_id = step.node_id
+                edges_created_for_step = False
+
+                # Try calls_next first
+                if step.calls_next:
+                    for target_ref in step.calls_next:
+                        # LLM uses "file.py:func" format, DB uses "file.py::func"
+                        lookup_key = target_ref.replace(":", "::", 1)
+                        target_id = fqn_to_db_id.get(lookup_key)
+                        if target_id and target_id != source_id:
+                            db_edge = CodeEdge(
+                                id=_uuid(),
+                                snapshot_id=snapshot.id,
+                                source_node_id=source_id,
+                                target_node_id=target_id,
+                                edge_type="calls",
+                                is_llm_inferred=True,
+                            )
+                            self._session.add(db_edge)
+                            edge_count += 1
+                            edges_created_for_step = True
+
+                # Fallback: sequential edge to next step if no calls_next resolved
+                if not edges_created_for_step and idx + 1 < len(steps):
+                    next_step = steps[idx + 1]
+                    if next_step.node_id:
+                        db_edge = CodeEdge(
+                            id=_uuid(),
+                            snapshot_id=snapshot.id,
+                            source_node_id=source_id,
+                            target_node_id=next_step.node_id,
+                            edge_type="calls",
+                            is_llm_inferred=True,
+                        )
+                        self._session.add(db_edge)
+                        edge_count += 1
 
         await self._session.flush()
 
+        # --- Dead code detection ---
+        dead_code_count = 0
+        if hasattr(result, "all_functions") and result.all_functions:
+            for func_sig in result.all_functions:
+                func_key = f"{func_sig.file}:{func_sig.name}"
+                if func_key not in assigned_functions:
+                    # Skip __init__, __main__, and private test helpers
+                    if func_sig.name.startswith("__") and func_sig.name.endswith("__"):
+                        continue
+
+                    node_id = _uuid()
+                    db_node = CodeNode(
+                        id=node_id,
+                        snapshot_id=snapshot.id,
+                        file_path=func_sig.file,
+                        node_type="function",
+                        name=func_sig.name,
+                        language=self._detect_language(func_sig.file),
+                        line_start=func_sig.line_start,
+                        line_end=func_sig.line_end,
+                        source_code="",
+                        docstring=None,
+                        feature_id=None,
+                        is_entry_point=False,
+                        is_dead_code=True,
+                        description="Not referenced by any discovered feature",
+                    )
+                    self._session.add(db_node)
+                    dead_code_count += 1
+
+            await self._session.flush()
+
         stats["features"] = len(db_features)
-        stats["nodes"] = sum(len(f.flow_steps) for f in result.features)
-        stats["edges"] = stats["nodes"] - len(result.features)  # approx
+        stats["nodes"] = sum(len(f.flow_steps) for f in result.features) + dead_code_count
+        stats["edges"] = edge_count
+        stats["dead_code_nodes"] = dead_code_count
         stats["analysis_mode"] = "llm_agent"
 
         # Persist snapshot

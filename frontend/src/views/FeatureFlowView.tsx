@@ -21,16 +21,16 @@ const nodeTypes = {
   flowStepNode: FlowStepNode,
 };
 
-const FLOW_NODE_WIDTH = 300;
-const FLOW_NODE_HEIGHT = 120;
+const FLOW_NODE_WIDTH = 380;
+const FLOW_NODE_HEIGHT = 150;
 
 function layoutFlowNodes(steps: FlowStep[], edges: Edge[], featureColor: string): Node[] {
   const g = new dagre.graphlib.Graph();
   g.setDefaultEdgeLabel(() => ({}));
   g.setGraph({
     rankdir: 'TB',
-    nodesep: 80,
-    ranksep: 100,
+    nodesep: 120,
+    ranksep: 160,
     marginx: 40,
     marginy: 40,
   });

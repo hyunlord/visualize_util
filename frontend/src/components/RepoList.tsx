@@ -1,8 +1,13 @@
 import { useRepoStore } from '../stores/repoStore';
 import { useGraphStore } from '../stores/graphStore';
 
+const LANGUAGES = [
+  { code: 'en', label: 'English' },
+  { code: 'ko', label: '한국어' },
+];
+
 export default function RepoList() {
-  const { repos, selectedRepoId, selectRepo, startAnalysis } = useRepoStore();
+  const { repos, selectedRepoId, selectRepo, startAnalysis, analysisLanguage, setAnalysisLanguage } = useRepoStore();
   const { fetchGraph, fetchDeadCode } = useGraphStore();
 
   const handleSelect = async (repoId: string) => {
@@ -42,15 +47,25 @@ export default function RepoList() {
             )}
           </div>
           {selectedRepoId === repo.id && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleReanalyze(repo.id);
-              }}
-              className="mt-2 text-xs px-3 py-1 rounded bg-slate-700 text-slate-300 hover:bg-slate-600"
-            >
-              Re-analyze
-            </button>
+            <div className="mt-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+              <select
+                value={analysisLanguage}
+                onChange={(e) => setAnalysisLanguage(e.target.value)}
+                className="text-xs px-2 py-1 rounded bg-slate-700 text-slate-300 border border-slate-600 focus:outline-none focus:border-blue-500"
+              >
+                {LANGUAGES.map((lang) => (
+                  <option key={lang.code} value={lang.code}>
+                    {lang.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => handleReanalyze(repo.id)}
+                className="text-xs px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-500 transition-colors"
+              >
+                Analyze
+              </button>
+            </div>
           )}
         </div>
       ))}

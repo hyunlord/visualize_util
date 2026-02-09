@@ -6,12 +6,14 @@ interface RepoState {
   repos: RepoResponse[];
   selectedRepoId: string | null;
   analysisStatus: AnalysisStatusResponse | null;
+  analysisLanguage: string;
   loading: boolean;
   error: string | null;
 
   fetchRepos: () => Promise<void>;
   addRepo: (url?: string, localPath?: string, branch?: string) => Promise<RepoResponse>;
   selectRepo: (id: string) => void;
+  setAnalysisLanguage: (lang: string) => void;
   startAnalysis: (repoId: string) => Promise<void>;
   pollAnalysisStatus: (repoId: string) => Promise<void>;
   clearError: () => void;
@@ -21,6 +23,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   repos: [],
   selectedRepoId: null,
   analysisStatus: null,
+  analysisLanguage: 'en',
   loading: false,
   error: null,
 
@@ -50,10 +53,15 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     set({ selectedRepoId: id, analysisStatus: null });
   },
 
+  setAnalysisLanguage: (lang: string) => {
+    set({ analysisLanguage: lang });
+  },
+
   startAnalysis: async (repoId: string) => {
     try {
       set({ loading: true, error: null });
-      const status = await api.analysis.start(repoId);
+      const language = get().analysisLanguage;
+      const status = await api.analysis.start(repoId, language);
       set({ analysisStatus: status, loading: false });
       if (status.status === 'running') {
         get().pollAnalysisStatus(repoId);

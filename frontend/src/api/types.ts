@@ -4,6 +4,10 @@ export interface RepoCreateRequest {
   branch?: string;
 }
 
+export interface AnalysisRequest {
+  language: string;
+}
+
 export interface RepoResponse {
   id: string;
   url: string | null;

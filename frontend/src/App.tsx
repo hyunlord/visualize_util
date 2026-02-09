@@ -10,6 +10,7 @@ export default function App() {
   const { fetchRepos, selectedRepoId } = useRepoStore();
   const {
     features,
+    deadCode,
     currentView,
     featureFlow,
     flowLoading,
@@ -67,14 +68,14 @@ export default function App() {
     // Feature Flow View
     if (currentView === 'flow' && featureFlow) {
       return (
-        <>
+        <div className="relative w-full h-full">
           <FeatureFlowView
             flowData={featureFlow}
             onBack={goToOverview}
             onNodeClick={selectNode}
           />
           {selectedNodeId && <FlowNodeDetail />}
-        </>
+        </div>
       );
     }
 
@@ -94,6 +95,7 @@ export default function App() {
     return (
       <FeatureOverview
         features={features}
+        deadCode={deadCode}
         onSelectFeature={handleSelectFeature}
       />
     );

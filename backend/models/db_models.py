@@ -94,6 +94,7 @@ class AnalysisSnapshot(Base):
         DateTime(timezone=True), default=_utcnow,
     )
     stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    language: Mapped[str] = mapped_column(String(8), default="en")
 
     # -- relationships --
     repository: Mapped[Repository] = relationship(back_populates="snapshots")

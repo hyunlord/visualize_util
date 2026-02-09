@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import async_session_factory, get_db
 from backend.git_ops.diff import get_current_sha
 from backend.models.db_models import AnalysisSnapshot, Repository
-from backend.models.schemas import AnalysisStatusResponse
+from backend.models.schemas import AnalysisRequest, AnalysisStatusResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,7 +45,7 @@ def get_analysis_progress() -> dict[str, AnalysisStatusResponse]:
 # ---------------------------------------------------------------------------
 
 
-async def _run_analysis(repo_id: str, snapshot_id: str) -> None:
+async def _run_analysis(repo_id: str, snapshot_id: str, language: str = "en") -> None:
     """Execute a full analysis in the background.
 
     Uses its own database session (not the request session) because
@@ -89,10 +89,11 @@ async def _run_analysis(repo_id: str, snapshot_id: str) -> None:
                 current_stage="Initialising analysis engine",
             )
 
-            def progress_callback(pct: float, stage: str) -> None:
+            def progress_callback(stage: str, pct: float) -> None:
                 """Update the shared progress state.
 
                 Called by the analysis engine at each significant step.
+                Signature matches engine: (stage_name, percentage).
                 """
                 _analysis_progress[repo_id] = AnalysisStatusResponse(
                     snapshot_id=snapshot_id,
@@ -103,7 +104,7 @@ async def _run_analysis(repo_id: str, snapshot_id: str) -> None:
 
             registry = get_default_registry()
             engine = AnalysisEngine(session, registry)
-            await engine.run_full_analysis(repo, snapshot, progress_callback)
+            await engine.run_full_analysis(repo, snapshot, progress_callback, language=language)
 
             snapshot.status = "completed"
             repo.last_analyzed_at = datetime.now(timezone.utc)
@@ -158,6 +159,7 @@ async def _run_analysis(repo_id: str, snapshot_id: str) -> None:
 )
 async def start_analysis(
     repo_id: str,
+    body: AnalysisRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> AnalysisStatusResponse:
     """Trigger a full analysis of the repository.
@@ -209,8 +211,9 @@ async def start_analysis(
     _analysis_progress[repo_id] = progress
 
     # Launch the background task -- it manages its own DB session
+    language = body.language if body else "en"
     asyncio.create_task(
-        _run_analysis(repo_id, snapshot.id),
+        _run_analysis(repo_id, snapshot.id, language=language),
         name=f"analysis-{repo_id}",
     )
 

@@ -46,6 +46,18 @@ class RepoResponse(BaseModel):
 # Analysis
 # ---------------------------------------------------------------------------
 
+# Supported analysis languages (extensible)
+SUPPORTED_LANGUAGES: dict[str, str] = {
+    "en": "English",
+    "ko": "Korean",
+}
+
+
+class AnalysisRequest(BaseModel):
+    """Payload for starting a new analysis."""
+    language: str = Field(default="en", description="Language for feature names and descriptions")
+
+
 class AnalysisStatusResponse(BaseModel):
     """Progress update for a running or completed analysis."""
 

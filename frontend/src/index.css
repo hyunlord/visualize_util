@@ -10,10 +10,6 @@ body {
   color: #e2e8f0;
 }
 
-.react-flow__node {
-  font-size: 12px;
-}
-
 .react-flow__edge-path {
   stroke-width: 1.5;
 }
